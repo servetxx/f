@@ -66,7 +66,7 @@ def fetch_ticker(symbol):
         return None
 
 # Binance'den 1 dakikalık verileri çek
-def fetch_ohlcv(symbol, timeframe='1m', limit=100):
+def fetch_ohlcv(symbol, timeframe='3m', limit=100):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
         print(f"Veri çekildi: {len(data)} mum")
@@ -76,7 +76,7 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
         return []
 
 # Ana işlem döngüsü
-def main(symbols, quote_currency, stop_loss_pct, take_profit_pct):
+def main(symbols, quote_currency, take_profit_pct):
     symbol_states = {symbol: {'rsi_triggered': False, 'rsi_condition': None, 'buy_price': None, 'sold_out': False} for symbol in symbols}
 
     while True:
@@ -95,7 +95,7 @@ def main(symbols, quote_currency, stop_loss_pct, take_profit_pct):
                 continue
 
             # 1 dakikalık verileri çek
-            ohlcv = fetch_ohlcv(symbol, timeframe='1m', limit=100)
+            ohlcv = fetch_ohlcv(symbol, timeframe='3m', limit=100)
             closes = [x[4] for x in ohlcv]  # Kapanış fiyatlarını al
 
             # RSI hesapla
@@ -140,22 +140,8 @@ def main(symbols, quote_currency, stop_loss_pct, take_profit_pct):
                         print(f"{datetime.now()} - {symbol} için yeterli {base_currency} bakiyesi yok.")
                         symbol_state['sold_out'] = True  # Satış yapılamadı, sold_out bayrağını ayarla
 
-            # Stop-loss ve take-profit kontrolleri
+            # Take-profit kontrolü
             if symbol_state['buy_price']:
-                if current_price <= symbol_state['buy_price'] * (1 - stop_loss_pct):
-                    if base_balance > 0:
-                        order = place_sell_order(symbol, base_balance)
-                        if order:
-                            symbol_state['buy_price'] = None  # Alış fiyatını sıfırla
-                            symbol_state['rsi_triggered'] = False  # RSI tetiklemesini sıfırla
-                            symbol_state['rsi_condition'] = None
-                            symbol_state['sold_out'] = False  # Satış başarılı, sold_out bayrağını sıfırla
-                        print(f"{datetime.now()} - {symbol} Stop-loss tetiklendi. Fiyat: {current_price}")
-                    else:
-                        if not symbol_state['sold_out']:
-                            print(f"{datetime.now()} - {symbol} için yeterli {base_currency} bakiyesi yok.")
-                            symbol_state['sold_out'] = True  # Satış yapılamadı, sold_out bayrağını ayarla
-
                 if current_price >= symbol_state['buy_price'] * (1 + take_profit_pct):
                     if base_balance > 0:
                         order = place_sell_order(symbol, base_balance)
@@ -174,8 +160,7 @@ def main(symbols, quote_currency, stop_loss_pct, take_profit_pct):
         time.sleep(60)
 
 if __name__ == "__main__":
-    symbols = ["SSV/USDT", "IQ/USDT", "NOT/USDT"]  # İşlem yapmak istediğiniz coin çiftleri
+    symbols = ["SSV/USDT", "ID/USDT", "BONK/USDT"]  # İşlem yapmak istediğiniz coin çiftleri
     quote_currency = "USDT"  # Referans para birimi
-    stop_loss_pct = 0.02  # %2 stop-loss
     take_profit_pct = 0.05  # %5 take-profit
-    main(symbols, quote_currency, stop_loss_pct, take_profit_pct)
+    main(symbols, quote_currency, take_profit_pct)
