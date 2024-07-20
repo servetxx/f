@@ -23,19 +23,13 @@ def calculate_rsi(closes, window=14):
     rsi = df.ta.rsi(length=window)
     return rsi.iloc[-1] if not rsi.empty else None
 
-# MACD hesaplama
-def calculate_macd(closes, short_window=12, long_window=26, signal_window=9):
-    df = pd.DataFrame(closes, columns=['close'])
-    macd = df.ta.macd(fast=short_window, slow=long_window, signal=signal_window)
-    return macd['MACD_12_26_9'].iloc[-1], macd['MACDs_12_26_9'].iloc[-1]
-
 # Mevcut bakiyeyi al
 def get_balance():
     balance = exchange.fetch_balance()
     return balance
 
 # Alım emri gönder
-def place_buy_order(symbol, amount_usdt):
+def place_market_buy_order(symbol, amount_usdt):
     try:
         ticker = exchange.fetch_ticker(symbol)
         amount_coin = amount_usdt / ticker['last']
@@ -47,7 +41,7 @@ def place_buy_order(symbol, amount_usdt):
         return None
 
 # Satım emri gönder
-def place_sell_order(symbol, amount_coin):
+def place_market_sell_order(symbol, amount_coin):
     try:
         order = exchange.create_market_sell_order(symbol, amount_coin)
         print(f"{datetime.now()} - Satım emri başarıyla gönderildi. Satılan miktar: {amount_coin} {symbol.split('/')[0]}")
@@ -66,9 +60,9 @@ def fetch_ticker(symbol):
         return None
 
 # Binance'den 1 dakikalık verileri çek
-def fetch_ohlcv(symbol, timeframe='3m', limit=100):
+def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     try:
-        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         print(f"Veri çekildi: {len(data)} mum")
         return data
     except Exception as e:
@@ -76,8 +70,8 @@ def fetch_ohlcv(symbol, timeframe='3m', limit=100):
         return []
 
 # Ana işlem döngüsü
-def main(symbols, quote_currency, take_profit_pct):
-    symbol_states = {symbol: {'rsi_triggered': False, 'rsi_condition': None, 'buy_price': None, 'sold_out': False} for symbol in symbols}
+def main(symbols, quote_currency, take_profit_pct, stop_loss_pct, cooldown_period):
+    symbol_states = {symbol: {'rsi_triggered': False, 'buy_price': None, 'sold_out': False, 'cooldown': False} for symbol in symbols}
 
     while True:
         balance = get_balance()
@@ -88,6 +82,9 @@ def main(symbols, quote_currency, take_profit_pct):
             base_balance = balance['total'][base_currency]
             symbol_state = symbol_states[symbol]
 
+            if symbol_state['cooldown']:
+                continue  # Bekleme süresi devam ediyorsa bu sembolü atla
+
             # Anlık fiyatı al
             current_price = fetch_ticker(symbol)
             if current_price is None:
@@ -95,72 +92,66 @@ def main(symbols, quote_currency, take_profit_pct):
                 continue
 
             # 1 dakikalık verileri çek
-            ohlcv = fetch_ohlcv(symbol, timeframe='3m', limit=100)
+            ohlcv = fetch_ohlcv(symbol, timeframe='1m', limit=100)
             closes = [x[4] for x in ohlcv]  # Kapanış fiyatlarını al
 
             # RSI hesapla
             rsi = calculate_rsi(closes)
-            macd, signal = calculate_macd(closes)
 
             print(f"\n{datetime.now()} - {symbol} Güncel Fiyat: {current_price}")
             print(f"RSI: {rsi}")
-            print(f"MACD: {macd}, Signal: {signal}")
 
-            # RSI sinyalini kontrol et
-            if not symbol_state['rsi_triggered']:
-                if rsi < 30:
-                    symbol_state['rsi_triggered'] = True
-                    symbol_state['rsi_condition'] = 'buy'
-                    print(f"{symbol} RSI aşırı satım bölgesinde, MACD sinyali bekleniyor...")
-
-                if rsi > 70:
-                    symbol_state['rsi_triggered'] = True
-                    symbol_state['rsi_condition'] = 'sell'
-                    print(f"{symbol} RSI aşırı alım bölgesinde, MACD sinyali bekleniyor...")
-
-            # RSI tetiklendiğinde MACD sinyalini kontrol et
-            if symbol_state['rsi_triggered'] and symbol_state['rsi_condition'] == 'buy' and macd > signal:
+            # RSI sinyalini kontrol et ve alım yap
+            if rsi is not None and rsi < 25 and not symbol_state['rsi_triggered']:
                 amount_quote = quote_balance / len(symbols)  # Her sembole eşit miktar ayır
-                order = place_buy_order(symbol, amount_quote)
+                order = place_market_buy_order(symbol, amount_quote)
                 if order:
                     symbol_state['buy_price'] = current_price  # Alış fiyatını kaydet
-                    symbol_state['rsi_triggered'] = False  # RSI tetiklemesini sıfırla
-                    symbol_state['rsi_condition'] = None
+                    symbol_state['rsi_triggered'] = True  # RSI tetiklemesini ayarla
 
-            if symbol_state['rsi_triggered'] and symbol_state['rsi_condition'] == 'sell' and macd < signal:
-                if base_balance > 0:
-                    order = place_sell_order(symbol, base_balance)
-                    if order:
-                        symbol_state['buy_price'] = None  # Alış fiyatını sıfırla
-                        symbol_state['rsi_triggered'] = False  # RSI tetiklemesini sıfırla
-                        symbol_state['rsi_condition'] = None
-                        symbol_state['sold_out'] = False  # Satış başarılı, sold_out bayrağını sıfırla
-                else:
-                    if not symbol_state['sold_out']:
-                        print(f"{datetime.now()} - {symbol} için yeterli {base_currency} bakiyesi yok.")
-                        symbol_state['sold_out'] = True  # Satış yapılamadı, sold_out bayrağını ayarla
-
-            # Take-profit kontrolü
+            # Take-profit ve stop-loss kontrolü
             if symbol_state['buy_price']:
                 if current_price >= symbol_state['buy_price'] * (1 + take_profit_pct):
                     if base_balance > 0:
-                        order = place_sell_order(symbol, base_balance)
+                        order = place_market_sell_order(symbol, base_balance)
                         if order:
                             symbol_state['buy_price'] = None  # Alış fiyatını sıfırla
                             symbol_state['rsi_triggered'] = False  # RSI tetiklemesini sıfırla
-                            symbol_state['rsi_condition'] = None
                             symbol_state['sold_out'] = False  # Satış başarılı, sold_out bayrağını sıfırla
+                            symbol_state['cooldown'] = True  # Bekleme süresini başlat
                         print(f"{datetime.now()} - {symbol} Take-profit tetiklendi. Fiyat: {current_price}")
                     else:
                         if not symbol_state['sold_out']:
                             print(f"{datetime.now()} - {symbol} için yeterli {base_currency} bakiyesi yok.")
                             symbol_state['sold_out'] = True  # Satış yapılamadı, sold_out bayrağını ayarla
 
+                elif current_price <= symbol_state['buy_price'] * (1 - stop_loss_pct):
+                    if base_balance > 0:
+                        order = place_market_sell_order(symbol, base_balance)
+                        if order:
+                            symbol_state['buy_price'] = None  # Alış fiyatını sıfırla
+                            symbol_state['rsi_triggered'] = False  # RSI tetiklemesini sıfırla
+                            symbol_state['sold_out'] = False  # Satış başarılı, sold_out bayrağını sıfırla
+                            symbol_state['cooldown'] = True  # Bekleme süresini başlat
+                        print(f"{datetime.now()} - {symbol} Stop-loss tetiklendi. Fiyat: {current_price}")
+                    else:
+                        if not symbol_state['sold_out']:
+                            print(f"{datetime.now()} - {symbol} için yeterli {base_currency} bakiyesi yok.")
+                            symbol_state['sold_out'] = True  # Satış yapılamadı, sold_out bayrağını ayarla
+
+        # Bekleme süresini kontrol et ve gerektiğinde sıfırla
+        for symbol in symbols:
+            if symbol_states[symbol]['cooldown']:
+                time.sleep(cooldown_period)
+                symbol_states[symbol]['cooldown'] = False
+
         # Her 1 dakikada bir işlem yap
-        time.sleep(60)
+        time.sleep(15)
 
 if __name__ == "__main__":
-    symbols = ["SSV/USDT", "ID/USDT", "BONK/USDT"]  # İşlem yapmak istediğiniz coin çiftleri
+    symbols = ["BAKE/USDT", "BNX/USDT", "XRP/USDT", "PEOPLE/USDT", "1000SATS/USDT", "NOT/USDT", "COS/USDT"]  # İşlem yapmak istediğiniz coin çiftleri
     quote_currency = "USDT"  # Referans para birimi
-    take_profit_pct = 0.05  # %5 take-profit
-    main(symbols, quote_currency, take_profit_pct)
+    take_profit_pct = 0.032  # %3.2 kar
+    stop_loss_pct = 0.013  # %1.3 stop-loss
+    cooldown_period = 60 * 5  # 5 dakika bekleme süresi
+    main(symbols, quote_currency, take_profit_pct, stop_loss_pct, cooldown_period)
